@@ -177,6 +177,32 @@ connection_get_pidfd_legacy_fiber (GDBusConnection *connection,
   return xdp_pid_fd_result_new (pid, -1);
 }
 
+/*
+ * connection_get_pidfd_fiber_reject:
+ *
+ * Build a rejected future for the pidfd path, always with a non-NULL error.
+ *
+ * @local_error may be NULL when the underlying libdex/GDBus call fails without
+ * populating an error (for example when the caller's process is exiting
+ * concurrently, so its credentials/pidfd can no longer be resolved). Passing a
+ * NULL GError to dex_future_new_for_error() would create a rejected future
+ * whose error is NULL, which is then propagated to dex_await_object() and ends
+ * up dereferenced by authorize_callback() (xdp-context.c) as error->message,
+ * crashing xdg-desktop-portal with a SIGSEGV.
+ */
+static DexFuture *
+connection_get_pidfd_fiber_reject (GError      *local_error,
+                                   const char  *sender)
+{
+  if (local_error != NULL)
+    return dex_future_new_for_error (g_steal_pointer (&local_error));
+
+  return dex_future_new_reject (G_IO_ERROR,
+                                G_IO_ERROR_FAILED,
+                                "Failed to get pidfd for sender '%s'",
+                                sender);
+}
+
 static DexFuture *
 connection_get_pidfd_fiber (GDBusConnection *connection,
                             const char      *sender)
@@ -216,7 +242,7 @@ connection_get_pidfd_fiber (GDBusConnection *connection,
             return dex_future_new_take_boxed (XDP_TYPE_PID_FD_RESULT,
                                               g_steal_pointer (&result));
         }
-      return dex_future_new_for_error (g_steal_pointer (&local_error));
+      return connection_get_pidfd_fiber_reject (local_error, sender);
     }
 
   reply = dex_await_variant (dex_ref (dex_future_set_get_future_at (DEX_FUTURE_SET (future), 0)), NULL);
@@ -235,7 +261,7 @@ connection_get_pidfd_fiber (GDBusConnection *connection,
         return dex_future_new_take_boxed (XDP_TYPE_PID_FD_RESULT,
                                           g_steal_pointer (&result));
       else
-        return dex_future_new_for_error (g_steal_pointer (&local_error));
+        return connection_get_pidfd_fiber_reject (local_error, sender);
     }
 
   pid = g_variant_get_uint32 (process_id);
@@ -255,7 +281,7 @@ connection_get_pidfd_fiber (GDBusConnection *connection,
 
   pidfd = g_unix_fd_list_get (fd_list, fd_id, &local_error);
   if (pidfd < 0)
-    return dex_future_new_for_error (g_steal_pointer (&local_error));
+    return connection_get_pidfd_fiber_reject (local_error, sender);
 
   return dex_future_new_take_boxed (XDP_TYPE_PID_FD_RESULT,
                                     xdp_pid_fd_result_new (pid, g_steal_fd (&pidfd)));
